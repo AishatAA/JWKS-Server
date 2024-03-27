@@ -1,13 +1,12 @@
-import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from urllib.parse import urlparse, parse_qs
+import base64
 import json
 import jwt
 import datetime
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.backends import default_backend
-import base64
+import sqlite3
 
 # Host and port for the server
 hostName = "localhost"
