@@ -4,6 +4,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
+from argon2 import PasswordHasher
 import os
 import base64
 import json
@@ -57,7 +58,6 @@ cursor.execute("""
 """)
 
 # Generate private keys if the table is empty
-# Generate private keys if the table is empty
 cursor.execute("SELECT COUNT(*) FROM keys")
 if cursor.fetchone()[0] == 0:
     private_key = rsa.generate_private_key(
@@ -93,24 +93,34 @@ if cursor.fetchone()[0] == 0:
     else:
         print("Error encrypting and storing private keys")
 
+# Function to encrypt private key
+def encrypt_private_key(private_key):
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.BestAvailableEncryption(encryption_key)
+    )
+    return pem
+
 # Function to decrypt private key
 def decrypt_private_key(encrypted_pem):
     # Decrypt the private key
     private_key = serialization.load_pem_private_key(encrypted_pem, password=None, backend=default_backend())
     return private_key
 
-# Function to check username and password during login
-def authenticate_user(username, password):
-    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
-    user_data = cursor.fetchone()
-    if not user_data:
-        return None  # User not found
+# Function to hash passwords using Argon2
+def hash_password(password):
+    ph = PasswordHasher()
+    return ph.hash(password)
 
-    # Placeholder for actual password verification
-    if password == "placeholder_for_hashed_password_verification":  # Replace with actual check
-        return user_data[0]  # Return user ID if password matches
-    else:
-        return None  # Invalid password
+# Function to verify password hashes
+def verify_password_hash(password, hash):
+    ph = PasswordHasher()
+    try:
+        ph.verify(hash, password)
+        return True
+    except:
+        return False
 
 # Function to handle user registration
 def register_user(username, email):
@@ -122,16 +132,8 @@ def register_user(username, email):
     # Generate a secure password (using UUIDv4 is not recommended, replace with a strong password generation method)
     password = str(uuid.uuid4())  # Replace with a secure password generation method
 
-    # Hash the password securely using a salt and PBKDF2
-    salt = os.urandom(16)
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=390000,
-        backend=default_backend()
-    )
-    password_hash = base64.urlsafe_b64encode(kdf.derive(password.encode()) + salt).decode('utf-8')
+    # Hash the password securely using Argon2
+    password_hash = hash_password(password)
 
     # Insert user data into database
     cursor.execute("INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)", (username, password_hash, email))
@@ -139,36 +141,36 @@ def register_user(username, email):
 
     return {"password": password}, 201  # Created
 
-class MyServer(BaseHTTPRequestHandler):
-    # Override methods for various HTTP requests
+# Function to log authentication requests
+def log_auth_request(request_ip, user_id):
+    cursor.execute("INSERT INTO auth_logs (request_ip, user_id) VALUES (?, ?)", (request_ip, user_id))
+    conn.commit()
 
+class MyServer(BaseHTTPRequestHandler):
     def do_PUT(self):
-        # Respond with Method Not Allowed (405)
         self.send_response(405)
         self.end_headers()
         return
 
     def do_PATCH(self):
-        # Respond with Method Not Allowed (405)
+        self.send_response(405)
         self.end_headers()
         return
 
     def do_DELETE(self):
-        # Respond with Method Not Allowed (405)
+        self.send_response(405)
         self.end_headers()
         return
 
     def do_HEAD(self):
-        # Respond with Method Not Allowed (405)
+        self.send_response(405)
         self.end_headers()
         return
 
     def do_POST(self):
         parsed_path = urlparse(self.path)
         params = parse_qs(parsed_path.query)
-
         if parsed_path.path == "/register":
-            # Handle user registration
             try:
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -176,7 +178,7 @@ class MyServer(BaseHTTPRequestHandler):
                 username = data["username"]
                 email = data["email"]
             except (KeyError, json.JSONDecodeError):
-                self.send_response(400)  # Bad Request (invalid JSON or missing fields)
+                self.send_response(400)
                 self.end_headers()
                 return
             response, status_code = register_user(username, email)
@@ -186,7 +188,6 @@ class MyServer(BaseHTTPRequestHandler):
             return
 
         elif parsed_path.path == "/auth":
-            # Handle authentication request
             try:
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -194,50 +195,44 @@ class MyServer(BaseHTTPRequestHandler):
                 username = data["username"]
                 password = data["password"]
             except (KeyError, json.JSONDecodeError):
-                self.send_response(400)  # Bad Request (invalid JSON or missing fields)
+                self.send_response(400)
                 self.end_headers()
                 return
 
-            user_id = authenticate_user(username, password)
-            if not user_id:
+            # Authenticate user
+            cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
+            user_data = cursor.fetchone()
+            if not user_data:
                 self.send_response(401)  # Unauthorized
                 self.end_headers()
                 return
 
-            # Get private key based on 'kid' parameter (if present)
-            kid = params.get("kid", ["goodKID"])[0]
-            cursor.execute("SELECT key FROM keys WHERE kid = ?", (kid,))
-            encrypted_pem = cursor.fetchone()[0]
+            # Verify password hash
+            if not verify_password_hash(password, user_data[1]):
+                self.send_response(401)  # Unauthorized
+                self.end_headers()
+                return
 
-            # Decrypt the private key
-            private_key = decrypt_private_key(encrypted_pem)
-
-            headers = {
-                "kid": kid
-            }
-            token_payload = {
-                "user": username,
-                "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-            }
-            encoded_jwt = jwt.encode(token_payload, private_key, algorithm="RS256", headers=headers)
-
-            # Log successful authentication attempt
+            # Log authentication request
             client_ip = self.client_address[0]
-            cursor.execute("INSERT INTO auth_logs (request_ip, user_id) VALUES (?, ?)", (client_ip, user_id))
-            conn.commit()
+            log_auth_request(client_ip, user_data[0])
+
+            # Generate JWT token
+            headers = {"kid": "goodKID"}
+            token_payload = {"user": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)}
+            encoded_jwt = jwt.encode(token_payload, pem, algorithm="RS256", headers=headers)
 
             self.send_response(200)
             self.end_headers()
             self.wfile.write(bytes(encoded_jwt, "utf-8"))
             return
 
-        elif parsed_path.path == "/.well-known/jwks.json":
-            # Get the private key for the goodKID
-            cursor.execute("SELECT key FROM keys WHERE kid = ?", ("goodKID",))
-            encrypted_pem = cursor.fetchone()[0]
-            private_key = decrypt_private_key(encrypted_pem)
-            numbers = private_key.private_numbers()
+        self.send_response(405)
+        self.end_headers()
+        return
 
+    def do_GET(self):
+        if self.path == "/.well-known/jwks.json":
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
@@ -256,20 +251,9 @@ class MyServer(BaseHTTPRequestHandler):
             self.wfile.write(bytes(json.dumps(keys), "utf-8"))
             return
 
-        self.send_response(405)  # Method Not Allowed for other requests
+        self.send_response(405)
         self.end_headers()
         return
-
-    def int_to_base64(self, value):
-        """Convert an integer to a Base64URL-encoded string"""
-        value_hex = format(value, 'x')
-        # Ensure even length
-        if len(value_hex) % 2 == 1:
-            value_hex = '0' + value_hex
-        value_bytes = bytes.fromhex(value_hex)
-        encoded = base64.urlsafe_b64encode(value_bytes).rstrip(b'=')
-        return encoded.decode('utf-8')
-
 
 if __name__ == "__main__":
     webServer = HTTPServer((hostName, serverPort), MyServer)
