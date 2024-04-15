@@ -5,3 +5,7 @@ Install 'cryptography' by using pip
 Gradebot
 ![Test1](https://github.com/AishatAA/JWKS-Server/assets/161804689/67407110-269f-43d9-b206-d688b2ea0748)
 To run the program - Know the directory before proceeding then type **python project2.py**
+
+Install 'argon2-cffi' by using pip
+Gradebot
+![image](https://github.com/AishatAA/JWKS-Server/assets/161804689/f8541907-c79e-46ae-8a4b-fb12d4c72702)
